@@ -13,6 +13,7 @@ class LabelConfig(BaseModel):
     judge_model_absolute: str
     feature_labels_absolute: str
     prompt_file: str
+    sample_network_absolute: str
 
     @model_validator(mode="after")
     def __post_init__(self):
