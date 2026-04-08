@@ -6,11 +6,14 @@ import os
 from tabulate import tabulate
 import numpy as np
 from pathlib import Path
+from safetensors import safe_open
+import torch
 
 # Trying to separate labels from the network computations
 class LabelRetriever():
-    def __init__(self, config: LabelConfig):
+    def __init__(self, config: LabelConfig, root_folder:str):
         self.config = config
+        self.root_folder = Path(self.config.sample_network_absolute) / root_folder
         sample_indices_path = Path(self.config.sample_network_absolute) / "sampled_features.npy"
         try:
             self.sample_indices = np.load(str(sample_indices_path))
@@ -181,6 +184,8 @@ class LabelRetriever():
             return a < 0
         else:  # abs_bottom
             return abs(a) > 0
+
+
     def query_features(self, queries):
         """
         Takes a list of (layer, feature_idx) tuples and returns a Pandas DataFrame 
@@ -306,16 +311,19 @@ class LabelRetriever():
             print("===== Downstream Neighbors =====")
             downstream_topk = self.get_k_downstream_neighbors(layer, feature_idx, k=k, method = "top", index_in_sampled = index_in_sampled)
             downstream_absbottomk = self.get_k_downstream_neighbors(layer, feature_idx, k=k, method = "abs_bottom", index_in_sampled = index_in_sampled)
+            print("Top neighbors")
             downstream_top_df, _ = self.get_labels_for_neighbors(layer, feature_idx, downstream_topk, index_in_sampled = index_in_sampled, additional_label_info = additional_label_info, show_source_feature = True, show_neighbors = True)
-            print("Bottom neighbors")
+            print("Absolute Bottom neighbors")
             downstream_absbottom_df, _ = self.get_labels_for_neighbors(layer, feature_idx, downstream_absbottomk, index_in_sampled = index_in_sampled, additional_label_info = additional_label_info, show_source_feature = False, show_neighbors = True)
 
         if layer > 0:
             print("\n===== Upstream Neighbors =====")
             upstream_topk = self.get_k_upstream_neighbors(layer, feature_idx, k=k, method = "top", index_in_sampled = index_in_sampled)
             upstream_absbottomk = self.get_k_upstream_neighbors(layer, feature_idx, k=k, method = "abs_bottom", index_in_sampled = index_in_sampled)
+
+            print("Top neighbors")
             upstream_top_df, _ = self.get_labels_for_neighbors(layer, feature_idx, upstream_topk, index_in_sampled = index_in_sampled, additional_label_info = additional_label_info, show_source_feature = False, show_neighbors = True)
-            print("Bottom neighbors")
+            print("Absolute Bottom neighbors")
             upstream_absbottom_df, _ = self.get_labels_for_neighbors(layer, feature_idx, upstream_absbottomk, index_in_sampled = index_in_sampled, additional_label_info = additional_label_info, show_source_feature = False, show_neighbors = True)
 
 

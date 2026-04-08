@@ -14,6 +14,7 @@ class LabelConfig(BaseModel):
     feature_labels_absolute: str
     prompt_file: str
     sample_network_absolute: str
+    n_layers: PositiveInt = 26
 
     @model_validator(mode="after")
     def __post_init__(self):
