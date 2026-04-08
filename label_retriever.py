@@ -11,9 +11,9 @@ import torch
 
 # Trying to separate labels from the network computations
 class LabelRetriever():
-    def __init__(self, config: LabelConfig, root_folder:str):
+    def __init__(self, config: LabelConfig):
         self.config = config
-        self.root_folder = Path(self.config.sample_network_absolute) / root_folder
+        self.root_folder = config.weight_folder_path
         sample_indices_path = Path(self.config.sample_network_absolute) / "sampled_features.npy"
         try:
             self.sample_indices = np.load(str(sample_indices_path))

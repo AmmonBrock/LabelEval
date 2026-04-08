@@ -1,13 +1,15 @@
-import sys
-sys.path.append("/home/ammonbro/CLT")
 from vllm import LLM, SamplingParams
-from virtual_weights import VirtualWeightNeighbors
+from label_retriever import LabelRetriever
+from configs.label_config import LabelConfig
 import numpy as np
 import os
-os.environ["HF_HUB_OFFLINE"] = "1"
-os.environ["TRANSFORMERS_OFFLINE"] = "1"
-os.environ["HF_DATASETS_OFFLINE"] = "1"
-os.environ["HF_HUB_CACHE"] = "/home/ammonbro/CLT/models/round2" 
+import argparse
+from pathlib import Path
+import yaml
+# os.environ["HF_HUB_OFFLINE"] = "1"
+# os.environ["TRANSFORMERS_OFFLINE"] = "1"
+# os.environ["HF_DATASETS_OFFLINE"] = "1"
+# os.environ["HF_HUB_CACHE"] = "/home/ammonbro/CLT/models/round2" 
 import shelve
 from scipy.stats import binomtest
 # from transformers import AutoModelForCausalLM, AutoTokenizer
@@ -15,32 +17,29 @@ import math
 import random
 import time
 
+def load_config(config_path):
+    label_eval_dir = Path(__file__).resolve().parent
+    config_path = label_eval_dir / "configs" / config_path
+    return LabelConfig.from_yaml(str(config_path))
 
-weights_dir = "/home/ammonbro/CLT/twera_small_sample_150M"
-sample_indices_path = "/home/ammonbro/CLT/feature_filtering/sampled_features_small.npy"
-evaluation_path = "/home/ammonbro/LabelEval/results/qwen_eval_27"
-prefix = "twera_"
-suffix = ".safetensors"
-tensor_prefix = "TWERA_"
-index_in_sampled = True
-m = .05
-n_questions = 30
-judge_model_id = '/home/ammonbro/.cache/huggingface/hub/models--Qwen--Qwen2.5-7B-Instruct/snapshots/a09a35458c702b33eeacc393d103063234e8bc28/'
 
 class LabelEvaluation:
-    def __init__(self, weights_dir, sample_indices_path, evaluation_path,  prefix, suffix, tensor_prefix, judge_model_id, max_layer = 25, min_layer = 0, m = .05, n_questions= 30, character_1 = "A", character_2 = "B"):
-        self.twera_weight_network = VirtualWeightNeighbors(save_dir = weights_dir, sample_indices_path = sample_indices_path, prefix = prefix, suffix = suffix, tensor_prefix = tensor_prefix)
-        self.n_sampled_features = self.twera_weight_network.sample_indices.shape[1]
-        self.max_layer = max_layer
-        self.min_layer = min_layer
-        self.evaluation_path = evaluation_path
-        self.m = m
-        self.n_questions = n_questions
-        self.character_1 = character_1
-        self.character_2 = character_2
+    def __init__(self, config: LabelConfig):
+        self.config = config
+        self.weight_network = LabelRetriever(config) 
+        self.n_sampled_features = self.weight_network.sample_indices.shape[1]
+
+        self.max_layer = config.n_layers - 1
+        self.min_layer = 0
+        self.save_scores_path = str(config.eval_dir / "scores")
+        self.m = config.m
+        self.n_questions = config.n_questions
+        self.character_1 = config.character_1
+        self.character_2 = config.character_2
+
         self.llm = None
         self.tokenizer = None
-        self.current_model_id = judge_model_id
+        self.current_model_id = config.judge_model_absolute
         self.token_ids_1 = []
         self.token_ids_2 = []
         assert self.m <= .5, "m should be less than or equal to .5 to ensure there is a difference in distribution between top and bottom neighbors."
@@ -70,15 +69,19 @@ class LabelEvaluation:
 
 
     def show_evaluation_results(self):
-        with shelve.open(self.evaluation_path) as db:
+        if not os.path.exists(self.save_scores_path + ".db"):
+            print("No evaluation results found.")
+            return
+        with shelve.open(self.save_scores_path) as db:
             for key in db:
                 print(f"{key}: {db[key]}")
     def save_evaluation_result(self, layer:int, feature_idx:int, downstream:bool, score:float):
         assert isinstance(downstream, bool), f"downstream should be a boolean value instead of {type(downstream)}: {downstream}"
+        self.config.lock_parameters()
 
         type_key = "downstream" if downstream else "upstream"
         key = f"{layer}_{feature_idx}_{type_key}"
-        with shelve.open(self.evaluation_path, "c") as db:
+        with shelve.open(self.save_scores_path, "c") as db:
             if key not in db:
                 db[key] = {"score": score, "n_questions": self.n_questions}
             else:
@@ -87,9 +90,12 @@ class LabelEvaluation:
                 temp_dict["n_questions"] = self.n_questions
                 db[key] = temp_dict
     def get_evaluation_result(self, layer, feature_idx, downstream):
+        assert isinstance(downstream, bool), f"downstream should be a boolean value instead of {type(downstream)}: {downstream}"
+        if not os.path.exists(self.save_scores_path + ".db"):
+            return {}
         type_key = "downstream" if downstream else "upstream"
         key = f"{layer}_{feature_idx}_{type_key}"
-        with shelve.open(self.evaluation_path) as db:
+        with shelve.open(self.save_scores_path) as db:
             if key in db:
                 return db[key]
             else:
@@ -98,8 +104,8 @@ class LabelEvaluation:
 
     def sample_features_to_evaluate(self, layer, num_features):
         """Returns a numpy array of random feature indices to evaluate for a given layer. Assumes sample_indices_path is provided."""
-        assert (self.twera_weight_network.sample_indices is not None), "Sample indices not loaded. Please provide a valid sample_indices_path."
-        sampled_indices = self.twera_weight_network.sample_indices[layer]
+        assert (self.weight_network.sample_indices is not None), "Sample indices not loaded. Please provide a valid sample_indices_path."
+        sampled_indices = self.weight_network.sample_indices[layer]
         selected_indices = np.random.choice(sampled_indices, size=num_features, replace=False)
         return selected_indices.tolist()
     
@@ -114,7 +120,7 @@ class LabelEvaluation:
         n_downstream_features = self.n_sampled_features * (self.max_layer - layer) if downstream else self.n_sampled_features * (layer - self.min_layer)
         k = int(n_downstream_features * self.m)
         assert k > self.n_questions, f"m is too small to generate {self.n_questions} questions. k = {k}, n_questions = {self.n_questions}"
-        neighbor_func = self.twera_weight_network.get_k_downstream_neighbors if downstream else self.twera_weight_network.get_k_upstream_neighbors
+        neighbor_func = self.weight_network.get_k_downstream_neighbors if downstream else self.weight_network.get_k_upstream_neighbors
         kwargs = {"layer": layer, "feature_idx": feature_idx, "k": k,"index_in_sampled": True}
         if downstream: kwargs["max_layer"] = self.max_layer
         if not downstream: kwargs["min_layer"] = self.min_layer
@@ -125,15 +131,15 @@ class LabelEvaluation:
         k_downstream_bottom = neighbor_func(**kwargs, method = "abs_bottom")
 
         # I should sample more than n_questions so that I can drop the neighbors that have nan descriptions. int(1.5 *n_questions) should do the trick
-        to_sample = int(1.5 * self.n_questions)
+        to_sample = int(3 * self.n_questions)
         if len(k_downstream_top) < to_sample or len(k_downstream_bottom) < to_sample:
             raise ValueError(f"Tried to sample {to_sample} neighbors, but only found {len(k_downstream_top)} top neighbors and {len(k_downstream_bottom)} bottom neighbors.")
         k_downstream_top_sampled = np.array(k_downstream_top)[np.random.choice(len(k_downstream_top), size=to_sample, replace=False), :]
         k_downstream_bottom_sampled = np.array(k_downstream_bottom)[np.random.choice(len(k_downstream_bottom), size=to_sample, replace=False), :]
 
         # Get labels for sampled neighbors
-        top_neighbors, source = self.twera_weight_network.get_labels_for_neighbors(layer = layer, feature_idx = feature_idx, neighbor_results = k_downstream_top_sampled, index_in_sampled = True, additional_label_info=['typeName'], show_source_feature = False, show_neighbors=False)
-        bottom_neighbors, _ = self.twera_weight_network.get_labels_for_neighbors(layer = layer, feature_idx = feature_idx, neighbor_results = k_downstream_bottom_sampled, index_in_sampled = True, additional_label_info=['typeName'], show_source_feature = False, show_neighbors = False)
+        top_neighbors, source = self.weight_network.get_labels_for_neighbors(layer = layer, feature_idx = feature_idx, neighbor_results = k_downstream_top_sampled, index_in_sampled = True, additional_label_info=['typeName'], show_source_feature = False, show_neighbors=False)
+        bottom_neighbors, _ = self.weight_network.get_labels_for_neighbors(layer = layer, feature_idx = feature_idx, neighbor_results = k_downstream_bottom_sampled, index_in_sampled = True, additional_label_info=['typeName'], show_source_feature = False, show_neighbors = False)
         top_neighbors.dropna(subset = ["description"], inplace = True)
         bottom_neighbors.dropna(subset = ["description"], inplace = True)
 
@@ -152,7 +158,7 @@ class LabelEvaluation:
         # Only keep n_questions
         quiz_len = min(len(top_neighbors_deduped), len(bottom_neighbors_deduped), self.n_questions)
         if quiz_len < self.n_questions:
-            print("Warning: Did not find n_questions with valid descriptions")
+            print(f"Warning: Did not find {self.n_questions} questions with valid descriptions. Did find {quiz_len} valid questions.")
         top_neighbors = top_neighbors_deduped.iloc[:quiz_len]
         bottom_neighbors = bottom_neighbors_deduped.iloc[:quiz_len]
 
@@ -246,6 +252,21 @@ class LabelEvaluation:
         print(f"Evaluation completed in {end - start:.2f} seconds")
         return accuracy, correct_answers, probs_1_array, probs_2_array
 
+    def get_system_question_prompt(self, downstream = True):
+        with open(self.config.label_eval_dir / "judge_prompts" / self.config.prompt_file, "r") as f:
+            prompt_dict = yaml.safe_load(f)
+        
+        preamble = prompt_dict["preamble"]
+        downstream_description = prompt_dict["downstream_description"]
+        upstream_description = prompt_dict["upstream_description"]
+        formatting_instructions = prompt_dict["formatting_instructions"].format(self.character_1, self.character_2)
+        source_or_target = "Source" if downstream else "Target"
+        upstream_or_downstream = "downstream" if downstream else "upstream"
+        few_shot = prompt_dict["few_shot"].format(source_or_target, self.character_1, self.character_2, self.character_1, source_or_target, self.character_1, self.character_2, self.character_2)
+        question_text = prompt_dict["question_text"].format(upstream_or_downstream, source_or_target.lower(), self.character_1, self.character_2)
+        system_prompt = f"{preamble} {downstream_description if downstream else upstream_description} {formatting_instructions}\n\n{few_shot}"
+        return system_prompt, question_text
+
     def evaluate_batch_with_judge(self, feature_tuples, judge_model_id=None, downstream=True, save_results=True):
             """
             Evaluates a batch of (layer, feature_idx) tuples in a single vLLM generation call.
@@ -259,17 +280,9 @@ class LabelEvaluation:
 
 
             # Set up prompt
-            preamble = "You are an evaluator of feature labels within a neural network."
-            if downstream:
-                description = "You are given a source feature description and two downstream feature descriptions. One of these downstream features is strongly influenced by the source feature, while the other is weakly connected. Your task is to determine which downstream feature is strongly connected to the source feature based on the descriptions. Descriptions of related concepts are more likely to indicate a strong connection between features."
-            else:
-                description = "You are given a target feature description and two upstream feature descriptions. One of these upstream features has a strong causal influence over the target feature, while the other has a weak connection. Your task is to determine which upstream feature is more likely to have a strong influence on the target feature based on the descriptions. Descriptions of related concepts are more likely to indicate a strong connection between features."
-            formatting_instructions = f"Respond with exactly one character: '{self.character_1}' or '{self.character_2}', corresponding to the better option. Do not include any punctuation, formatting, or explanations."
+            system_prompt, question_text = self.get_system_question_prompt(downstream = downstream)
             source_or_target = "Source" if downstream else "Target"
-            upstream_or_downstream = "downstream" if downstream else "upstream"
-            few_shot = f"Example:\n{source_or_target} Feature: Texas\n{self.character_1}: Dallas\n{self.character_2}: Oxygen\nAnswer: {self.character_1}\n\nExample:\n{source_or_target} Feature: Happiness\n{self.character_1}: grass\n{self.character_2}: Elation\nAnswer: {self.character_2}"
-            system_prompt = f"{preamble} {description} {formatting_instructions}\n\n{few_shot}"
-            question_text = f"Which {upstream_or_downstream} feature description is more likely to have a strong connection to the {source_or_target.lower()} feature description? ({self.character_1} or {self.character_2})"
+
 
             all_prompts = []
             tracking_info = [] # Keeps track of which prompt belongs to which feature
@@ -447,7 +460,7 @@ class LabelEvaluation:
         print(f"Quiz complete: {quiz_complete}, Your score: {score:.2f}")
         return quiz_complete, score
 
-    def hand_label_random_features(self, n_features_to_label, m = .05, n_questions = 30, save_results = True):
+    def hand_label_random_features(self, n_features_to_label, save_results = True):
         failed_attempts = 0
         features_labeled = 0
         while True:
@@ -490,7 +503,11 @@ class LabelEvaluation:
         Args:
             downstream (bool or None): If True, only compute stats for downstream evaluations. If False, only compute stats for upstream evaluations. If None, compute stats for all evaluations.
         """
-        with shelve.open(self.evaluation_path) as db:
+        if not os.path.exists(self.save_scores_path + ".db"):
+            print("No evaluation results found.")
+            return [], [], []
+        
+        with shelve.open(self.save_scores_path) as db:
             scores = []
             keys = []
             questions = []
@@ -515,6 +532,9 @@ class LabelEvaluation:
         """Calculates a p-value for the observed average score compared to random guessing (0.5) using a binomial test."""
         
         scores, questions, keys = self.get_label_stats(downstream=downstream)
+        if not scores:
+            print("No evaluation results found.")
+            return None
         total_correct = int(sum([score * n for score, n in zip(scores, questions)]))
         total_questions = int(sum(questions))
         p_value = binomtest(total_correct, total_questions, p=0.5, alternative = "greater").pvalue
@@ -525,42 +545,18 @@ class LabelEvaluation:
 
         
 
-
-
-
-if __name__ == "__main__":
-    label_evaluator = LabelEvaluation(weights_dir = weights_dir, 
-                                      sample_indices_path = sample_indices_path, 
-                                      evaluation_path = evaluation_path, 
-                                      prefix = prefix, 
-                                      suffix = suffix, 
-                                      tensor_prefix = tensor_prefix,
-                                      judge_model_id=judge_model_id, 
-                                      m=m, 
-                                      n_questions = n_questions,
-                                      character_1 = "A",
-                                      character_2 = "B",
-
-                                    )
-    # Got 20/30 correct with m = .05, layer = 12, feature_idx = 4
-    # label_evaluator.take_quiz_for_feature(layer = 18, feature_idx = 11, downstream = True, save_results = True)    
-    # label_evaluator.hand_label_random_features(n_features_to_label = 30, save_results = True)    
-    # scores, questions, keys = label_evaluator.get_label_stats(downstream = None)
-
-
-
-    layers = np.arange(25)
-    indices = np.arange(1000)
-    combos = [(i, j) for i in range(25) for j in range(1000)]
-    # random.seed(22)
-    print("Seed = 27")
+def main(config):
+    label_evaluator = LabelEvaluation(config)
+    layers = np.arange(config.n_layers - 1)
+    n_samples_per_layer = np.load(str(Path(config.sample_network_absolute) / "sampled_features.npy")).shape[1]
+    indices = np.arange(n_samples_per_layer)
+    combos = [(i, j) for i in layers for j in indices]
     random.seed(27)
     random.shuffle(combos)
-    label_evaluator.evaluate_batch_with_judge(feature_tuples = combos[:20], judge_model_id=judge_model_id, downstream=True, save_results=False)
 
+    label_evaluator.evaluate_batch_with_judge(combos[:100], downstream = True, save_results = True)
     label_evaluator.calc_p_value(downstream = True)
 
-    # Clean up
     print("\nShutting down vLLM gracefully...")
     if hasattr(label_evaluator, 'llm') and label_evaluator.llm is not None:
         del label_evaluator.llm
@@ -569,9 +565,18 @@ if __name__ == "__main__":
     gc.collect()
     torch.cuda.empty_cache()
     print("Run complete!")
-        
 
-        # Sample n_questions from the top and bottom neighbors before getting the feature labels
+
+    
+
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Evaluate feature labels based on feature-connections")
+    parser.add_argument("--config", type=str, required=True, help="Path to YAML configuration file relative to configs directory")
+    args = parser.parse_args()
+    config = load_config(args.config)
+    main(config)
 
 
         

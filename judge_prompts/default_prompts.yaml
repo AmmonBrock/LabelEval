@@ -3,4 +3,4 @@ downstream_description: "You are given a source feature description and two down
 upstream_description: "You are given a target feature description and two upstream feature descriptions. One of these upstream features has a strong causal influence over the target feature, while the other has a weak connection. Your task is to determine which upstream feature is more likely to have a strong influence on the target feature based on the descriptions. Descriptions of related concepts are more likely to indicate a strong connection between features."
 formatting_instructions: "Respond with exactly one character: {} or {}, corresponding to the better option. Do not include any punctuation, formatting, or explanations."
 few_shot: "Example:\n{} Feature: Texas\n{}: Dallas\n{}: Oxygen\nAnswer: {}\n\nExample:\n{} Feature: Happiness\n{}: grass\n{}: Elation\nAnswer: {}"
-question_text: "Which {} feature description is more likely to have a strong connection to the {} feature description?"
+question_text: "Which {} feature description is more likely to have a strong connection to the {} feature description? ({} or {})"
