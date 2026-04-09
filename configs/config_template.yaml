@@ -6,7 +6,7 @@ m: .05
 n_questions: 30
 character_1: "A"
 character_2: "B"
-weight_folder: "virtual_weights"
+weight_folder: "coact_weights"
 use_judge_llm: true
 
 

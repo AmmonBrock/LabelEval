@@ -6,13 +6,8 @@ import os
 import argparse
 from pathlib import Path
 import yaml
-# os.environ["HF_HUB_OFFLINE"] = "1"
-# os.environ["TRANSFORMERS_OFFLINE"] = "1"
-# os.environ["HF_DATASETS_OFFLINE"] = "1"
-# os.environ["HF_HUB_CACHE"] = "/home/ammonbro/CLT/models/round2" 
 import shelve
 from scipy.stats import binomtest
-# from transformers import AutoModelForCausalLM, AutoTokenizer
 import math
 import random
 import time
@@ -159,8 +154,8 @@ class LabelEvaluation:
         quiz_len = min(len(top_neighbors_deduped), len(bottom_neighbors_deduped), self.n_questions)
         if quiz_len < self.n_questions:
             print(f"Warning: Did not find {self.n_questions} questions with valid descriptions. Did find {quiz_len} valid questions.")
-        top_neighbors = top_neighbors_deduped.iloc[:quiz_len]
-        bottom_neighbors = bottom_neighbors_deduped.iloc[:quiz_len]
+        top_neighbors = top_neighbors_deduped.sample(n=quiz_len)
+        bottom_neighbors = bottom_neighbors_deduped.sample(n=quiz_len)
 
         if len(source_deduped) == 0:
             raise ValueError("Source feature has no valid description. Cannot generate quiz.")
@@ -554,7 +549,7 @@ def main(config):
     random.seed(27)
     random.shuffle(combos)
 
-    label_evaluator.evaluate_batch_with_judge(combos[:100], downstream = True, save_results = True)
+    label_evaluator.evaluate_batch_with_judge(combos[:200], downstream = True, save_results = True)
     label_evaluator.calc_p_value(downstream = True)
 
     print("\nShutting down vLLM gracefully...")
