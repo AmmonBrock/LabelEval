@@ -112,6 +112,7 @@ class LabelEvaluation:
 
         
     
+        #FIXME - taking ALL of the downstream features and then sampling uniformly from the top percent of them creates bias because the number of downstream features varies by layer.
         n_downstream_features = self.n_sampled_features * (self.max_layer - layer) if downstream else self.n_sampled_features * (layer - self.min_layer)
         k = int(n_downstream_features * self.m)
         assert k > self.n_questions, f"m is too small to generate {self.n_questions} questions. k = {k}, n_questions = {self.n_questions}"
@@ -549,7 +550,7 @@ def main(config):
     random.seed(27)
     random.shuffle(combos)
 
-    label_evaluator.evaluate_batch_with_judge(combos[:200], downstream = True, save_results = True)
+    label_evaluator.evaluate_batch_with_judge(combos[400:600], downstream = True, save_results = True)
     label_evaluator.calc_p_value(downstream = True)
 
     print("\nShutting down vLLM gracefully...")
