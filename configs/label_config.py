@@ -11,12 +11,12 @@ class LabelConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
     
     eval_name: str
-    m: float
     n_questions: PositiveInt
     character_1: str
     character_2: str
     weight_folder: str #twera, era, virtual_weights, or coact_weights
     use_judge_llm: bool
+    validation: bool
     judge_model_absolute: str
     feature_labels_absolute: str
     prompt_file: str
@@ -27,8 +27,6 @@ class LabelConfig(BaseModel):
     @model_validator(mode="after")
     def __post_init__(self):
         assert self.character_1 != self.character_2, "character_1 and character_2 must be different"
-        assert self.m > 0, "m must be a positive float"
-        assert self.m <= .5, "m must be less than or equal to 0.5"
         assert os.path.exists(self.judge_model_absolute), f"judge_model_absolute path does not exist: {self.judge_model_absolute}"
         assert os.path.exists(self.feature_labels_absolute), f"feature_labels_absolute path does not exist: {self.feature_labels_absolute}"
         assert self.index_map_path.exists(), f"index_map_path does not exist: {self.index_map_path}"

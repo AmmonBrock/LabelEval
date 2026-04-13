@@ -2,12 +2,12 @@
 ##################### Evaluation Parameters ####################
 ################################################################
 eval_name: "template_eval"
-m: .05
 n_questions: 30
 character_1: "A"
 character_2: "B"
-weight_folder: "coact_weights"
+weight_folder: "twera"
 use_judge_llm: true
+validation: false
 
 
 # File paths

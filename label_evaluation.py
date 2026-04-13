@@ -19,7 +19,7 @@ def load_config(config_path):
 
 
 class LabelEvaluation:
-    def __init__(self, config: LabelConfig):
+    def __init__(self, config: LabelConfig, iteration = 0):
         self.config = config
         self.weight_network = LabelRetriever(config) 
         self.n_sampled_features = self.weight_network.sample_indices.shape[1]
@@ -27,7 +27,6 @@ class LabelEvaluation:
         self.max_layer = config.n_layers - 1
         self.min_layer = 0
         self.save_scores_path = str(config.eval_dir / "scores")
-        self.m = config.m
         self.n_questions = config.n_questions
         self.character_1 = config.character_1
         self.character_2 = config.character_2
@@ -37,7 +36,8 @@ class LabelEvaluation:
         self.current_model_id = config.judge_model_absolute
         self.token_ids_1 = []
         self.token_ids_2 = []
-        assert self.m <= .5, "m should be less than or equal to .5 to ensure there is a difference in distribution between top and bottom neighbors."
+        self.iteration = iteration
+        self.validation = config.validation
 
     def _lazy_load_judge_model(self, judge_model_id):
         if self.llm is None or self.current_model_id != judge_model_id:
@@ -112,10 +112,7 @@ class LabelEvaluation:
 
         
     
-        #FIXME - taking ALL of the downstream features and then sampling uniformly from the top percent of them creates bias because the number of downstream features varies by layer.
-        n_downstream_features = self.n_sampled_features * (self.max_layer - layer) if downstream else self.n_sampled_features * (layer - self.min_layer)
-        k = int(n_downstream_features * self.m)
-        assert k > self.n_questions, f"m is too small to generate {self.n_questions} questions. k = {k}, n_questions = {self.n_questions}"
+        k = self.n_questions * 4 # Sample more than 2*n_questions to account for potential invalid descriptions
         neighbor_func = self.weight_network.get_k_downstream_neighbors if downstream else self.weight_network.get_k_upstream_neighbors
         kwargs = {"layer": layer, "feature_idx": feature_idx, "k": k,"index_in_sampled": True}
         if downstream: kwargs["max_layer"] = self.max_layer
@@ -126,16 +123,18 @@ class LabelEvaluation:
         k_downstream_top = neighbor_func(**kwargs, method = "top")
         k_downstream_bottom = neighbor_func(**kwargs, method = "abs_bottom")
 
-        # I should sample more than n_questions so that I can drop the neighbors that have nan descriptions. int(1.5 *n_questions) should do the trick
-        to_sample = int(3 * self.n_questions)
-        if len(k_downstream_top) < to_sample or len(k_downstream_bottom) < to_sample:
-            raise ValueError(f"Tried to sample {to_sample} neighbors, but only found {len(k_downstream_top)} top neighbors and {len(k_downstream_bottom)} bottom neighbors.")
-        k_downstream_top_sampled = np.array(k_downstream_top)[np.random.choice(len(k_downstream_top), size=to_sample, replace=False), :]
-        k_downstream_bottom_sampled = np.array(k_downstream_bottom)[np.random.choice(len(k_downstream_bottom), size=to_sample, replace=False), :]
+        
+        # We need n_questions for initial evaluation and n_questions for validation after relabeling, and we need a buffer for invalid descriptions
+        if len(k_downstream_top) < int(k//2) or len(k_downstream_bottom) < int(k//2):
+            raise ValueError(f"Tried to sample {k} neighbors, but only found {len(k_downstream_top)} top neighbors and {len(k_downstream_bottom)} bottom neighbors.")
+        
+        k_downstream_top_sampled = np.array(k_downstream_top)[int(self.validation)::2] # Take even indices for initial evaluation and odd indices for validation after relabeling
+        k_downstream_bottom_sampled = np.array(k_downstream_bottom)[int(self.validation)::2]
+
 
         # Get labels for sampled neighbors
-        top_neighbors, source = self.weight_network.get_labels_for_neighbors(layer = layer, feature_idx = feature_idx, neighbor_results = k_downstream_top_sampled, index_in_sampled = True, additional_label_info=['typeName'], show_source_feature = False, show_neighbors=False)
-        bottom_neighbors, _ = self.weight_network.get_labels_for_neighbors(layer = layer, feature_idx = feature_idx, neighbor_results = k_downstream_bottom_sampled, index_in_sampled = True, additional_label_info=['typeName'], show_source_feature = False, show_neighbors = False)
+        top_neighbors, source = self.weight_network.get_labels_for_neighbors(layer = layer, feature_idx = feature_idx, neighbor_results = k_downstream_top_sampled, index_in_sampled = True, additional_label_info=['typeName'], show_source_feature = False, show_neighbors=False, iteration = self.iteration)
+        bottom_neighbors, _ = self.weight_network.get_labels_for_neighbors(layer = layer, feature_idx = feature_idx, neighbor_results = k_downstream_bottom_sampled, index_in_sampled = True, additional_label_info=['typeName'], show_source_feature = False, show_neighbors = False, iteration = self.iteration)
         top_neighbors.dropna(subset = ["description"], inplace = True)
         bottom_neighbors.dropna(subset = ["description"], inplace = True)
 
@@ -151,12 +150,16 @@ class LabelEvaluation:
         bottom_neighbors_deduped = bottom_neighbors_sorted.drop_duplicates(subset=["original_feature_idx", "layer"], keep="first")
         source_deduped = source_sorted.drop_duplicates(subset=["original_feature_idx", "layer"], keep="first")
 
+        # Resort by weight
+        top_neighbors_deduped = top_neighbors_deduped.sort_values(by="weight_value", ascending=False)
+        bottom_neighbors_deduped = bottom_neighbors_deduped.sort_values(by="weight_value", ascending=True)
+
         # Only keep n_questions
         quiz_len = min(len(top_neighbors_deduped), len(bottom_neighbors_deduped), self.n_questions)
         if quiz_len < self.n_questions:
-            print(f"Warning: Did not find {self.n_questions} questions with valid descriptions. Did find {quiz_len} valid questions.")
-        top_neighbors = top_neighbors_deduped.sample(n=quiz_len)
-        bottom_neighbors = bottom_neighbors_deduped.sample(n=quiz_len)
+            raise ValueError(f"Not enough valid descriptions to generate quiz. Found {len(top_neighbors_deduped)} top descriptions and {len(bottom_neighbors_deduped)} bottom descriptions, but need at least {self.n_questions} of each.")
+        top_neighbors = top_neighbors_deduped.iloc[:self.n_questions]
+        bottom_neighbors = bottom_neighbors_deduped.iloc[:self.n_questions]
 
         if len(source_deduped) == 0:
             raise ValueError("Source feature has no valid description. Cannot generate quiz.")
@@ -542,7 +545,7 @@ class LabelEvaluation:
         
 
 def main(config):
-    label_evaluator = LabelEvaluation(config)
+    label_evaluator = LabelEvaluation(config, iteration = 0)
     layers = np.arange(config.n_layers - 1)
     n_samples_per_layer = np.load(str(Path(config.sample_network_absolute) / "sampled_features.npy")).shape[1]
     indices = np.arange(n_samples_per_layer)
@@ -550,7 +553,7 @@ def main(config):
     random.seed(27)
     random.shuffle(combos)
 
-    label_evaluator.evaluate_batch_with_judge(combos[400:600], downstream = True, save_results = True)
+    label_evaluator.evaluate_batch_with_judge(combos[:200], downstream = True, save_results = True)
     label_evaluator.calc_p_value(downstream = True)
 
     print("\nShutting down vLLM gracefully...")

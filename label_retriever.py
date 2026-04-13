@@ -186,11 +186,14 @@ class LabelRetriever():
             return abs(a) > 0
 
 
-    def query_features(self, queries):
+    def query_features(self, queries, iteration):
         """
         Takes a list of (layer, feature_idx) tuples and returns a Pandas DataFrame 
         containing only the requested features.
         """
+        if iteration != 0:
+            raise NotImplementedError("Currently only supports querying from the original feature space. Querying from the sampled feature space is not yet implemented.")
+        
         index_map_path = self.config.index_map_path
 
         # 1. Load the pre-computed index
@@ -240,7 +243,7 @@ class LabelRetriever():
             return pd.concat(results, ignore_index=True)
         return pd.DataFrame()
         
-    def get_labels_for_neighbors(self, layer, feature_idx, neighbor_results, index_in_sampled = True, additional_label_info = [], show_source_feature = True, show_neighbors = True):
+    def get_labels_for_neighbors(self, layer, feature_idx, neighbor_results, index_in_sampled = True, additional_label_info = [], show_source_feature = True, show_neighbors = True, iteration = 0):
         """Get the feature labels for a list of neighbor results.
         
         Args:
@@ -275,7 +278,7 @@ class LabelRetriever():
         queries = list(zip(layers, original_feature_indices))
         queries.append((layer, original_source_feature_idx))
 
-        labels_df = self.query_features(queries)
+        labels_df = self.query_features(queries, iteration = iteration)
         labels_df.rename(columns={'index': 'original_feature_idx'}, inplace=True)
         labels_df = labels_df[['original_feature_idx', 'layer', 'description'] + additional_label_info]
         labels_df['layer'] = labels_df['layer'].str.replace("-clt-hp", "").astype(int)
