@@ -11,7 +11,7 @@ import torch
 
 # Trying to separate labels from the network computations
 class LabelRetriever():
-    def __init__(self, config: LabelConfig):
+    def __init__(self, config: LabelConfig, use_subnetwork_labels = True):
         self.config = config
         self.root_folder = config.weight_folder_path
         sample_indices_path = Path(self.config.sample_network_absolute) / "sampled_features.npy"
@@ -21,7 +21,53 @@ class LabelRetriever():
         except Exception as e:
             raise ValueError(f"Error loading sample indices from {sample_indices_path}, {e}")
         
+        if use_subnetwork_labels:
+            self.prepare_label_loading()
+            self.subnetwork_feature_labels = pd.read_csv(config.subnetwork_labels_dir / config.labels_name / "labels.csv", usecols = ["sample_index", "layer", "description"]).set_index(["layer", "sample_index"])['description'].to_dict()
+        self.use_subnetwork_labels = use_subnetwork_labels
+
         
+    def prepare_label_loading(self):
+        config = self.config
+        if (config.subnetwork_labels_dir / config.labels_name / "labels.csv").exists():
+            print(f"Subnetwork labels for {config.labels_name} already exist. Skipping generation.")
+            if not config.validate_subnetwork_label_params():
+                raise ValueError("Subnetwork label parameters do not match locked parameters. Please resolve the mismatch before proceeding.")
+            return
+        
+
+        sample_indices = self.sample_indices
+        layers = np.repeat(np.arange(sample_indices.shape[0]), sample_indices.shape[1])
+        original_feature_indices = sample_indices.ravel()
+        #Sample feature indices go from 0 to 4999 26 times
+        queries = list(zip(layers, original_feature_indices))
+        result = self.query_features(queries, iteration = 0)
+        result['layer'] = result['layer'].str.replace('-clt-hp', "").astype(int)
+        priority_map = {"np_max-act": 1, "np_max-act-logits": 2}
+        result['priority'] = result['typeName'].map(priority_map).fillna(3)
+        result_sorted = result.sort_values(by=["index", "layer", "priority"])
+        result_deduped = result_sorted.drop_duplicates(subset=["index", "layer"], keep = "first")
+        layers = result_deduped['layer'].values
+        original_feature_indices = result_deduped['index'].values
+
+
+        # Get the sample_indices in the dataframe as well
+        max_val = sample_indices.max()
+        reverse_lookup = np.full((sample_indices.shape[0], max_val + 1), -1, dtype=int)
+        row_indices = np.arange(sample_indices.shape[0])[:, None]
+        col_indices = np.arange(sample_indices.shape[1])
+        reverse_lookup[row_indices, sample_indices] = col_indices
+        sample_feature_indices = reverse_lookup[layers, original_feature_indices]
+        assert -1 not in sample_feature_indices, "Some original feature indices were not found in the sample_indices."
+        result_deduped['sample_index'] = sample_feature_indices
+        result_deduped.rename(columns={"index": "original_feature_index"}, inplace=True)
+        result_deduped = result_deduped[["original_feature_index", "sample_index", "layer", "description", "typeName"]]
+        result_deduped['description'] = result_deduped['description'].str[:100] # Truncate descriptions to 100 characters
+
+        os.makedirs(str(config.subnetwork_labels_dir / config.labels_name), exist_ok = True)
+        result_deduped.to_csv(config.subnetwork_labels_dir / config.labels_name / "labels.csv", index=False)
+        config.lock_subnetwork_label_params()
+
     def convert_original_to_sample_index(self, original_index, layer):
         sampled_layer_indices = self.sample_indices[layer]
         sample_index = np.where(sampled_layer_indices == original_index)[0]
@@ -205,7 +251,7 @@ class LabelRetriever():
         # Format: { 'path/to/batch-0.jsonl.gz': [feature_idx1, feature_idx2] }
         file_to_queries = {}
         
-        for layer, f_idx in queries:
+        for idx, (layer, f_idx) in enumerate(queries):
             if layer not in index_map:
                 print(f"Warning: Layer {layer} not found in index.")
                 continue
@@ -223,12 +269,17 @@ class LabelRetriever():
             else:
                 print(f"Warning: feature {f_idx} not found in layer {layer}")
 
+        print("Mapped file to queries", flush = True)
+
         # 3. Read the required files and extract the rows
         results = []
         columns_to_keep = ['index', 'layer', 'description', 'typeName', 'explanationModelName']
         
+        print("Num files to read:", len(file_to_queries), flush = True)
         for file_path, f_indices in file_to_queries.items():
             # Load the specific file
+            print(file_path, flush = True)
+
             df = pd.read_json(str(self.config.feature_labels_dir / file_path), lines = True, compression='gzip')
             
             # Filter down to just the requested feature indices
@@ -260,7 +311,25 @@ class LabelRetriever():
         
         for c in additional_label_info:
             assert c in ['typeName', 'explanationModelName'], "Additional label info must be in ['typeName', 'explanationModelName']"
+        if self.use_subnetwork_labels:
+            assert index_in_sampled, "Currently only supports using subnetwork labels when the feature indices are in the sampled feature space. Using original feature indices with subnetwork labels is not yet implemented."
         
+        if self.use_subnetwork_labels:
+            layers = []
+            sample_feature_indices = []
+            weight_values = []
+            descriptions = []
+
+            for n_layer, f_idx, weight in neighbor_results:
+                layers.append(n_layer)
+                sample_feature_indices.append(f_idx)
+                weight_values.append(weight)
+                description = self.subnetwork_feature_labels.get((n_layer, f_idx), None)
+                descriptions.append(description)
+            return pd.DataFrame({"sampled_feature_idx": sample_feature_indices, "layer": layers, "weight_value": weight_values, "description": descriptions}), pd.DataFrame({"sampled_feature_idx": [feature_idx], "layer": [layer], "description": [self.subnetwork_feature_labels.get((layer, feature_idx), None)]})
+
+        
+        print("Deprecation warning: using get_labels_for_neighbors with use_subnetwork_labels = False is deprecated and will be removed in a future version.")
         index_col_name = "original_feature_idx" if not index_in_sampled else "sampled_feature_idx"
         result = pd.DataFrame(neighbor_results, columns = ["layer", index_col_name, "weight_value"])
         result[["layer", index_col_name]] = result[["layer", index_col_name]].astype(int)
@@ -328,11 +397,3 @@ class LabelRetriever():
             upstream_top_df, _ = self.get_labels_for_neighbors(layer, feature_idx, upstream_topk, index_in_sampled = index_in_sampled, additional_label_info = additional_label_info, show_source_feature = False, show_neighbors = True)
             print("Absolute Bottom neighbors")
             upstream_absbottom_df, _ = self.get_labels_for_neighbors(layer, feature_idx, upstream_absbottomk, index_in_sampled = index_in_sampled, additional_label_info = additional_label_info, show_source_feature = False, show_neighbors = True)
-
-
-
-        
-
-
-
-

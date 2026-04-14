@@ -11,6 +11,7 @@ class LabelConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
     
     eval_name: str
+    labels_name: str
     n_questions: PositiveInt
     character_1: str
     character_2: str
@@ -76,6 +77,10 @@ class LabelConfig(BaseModel):
         return Path(self.feature_labels_absolute)
     
     @property
+    def subnetwork_labels_dir(self):
+        return self.label_eval_dir / "subnetwork_labels"
+    
+    @property
     def index_map_path(self):
         return self.feature_labels_dir / "feature_index_map.json"
     
@@ -95,7 +100,6 @@ class LabelConfig(BaseModel):
     
     def lock_parameters(self):
         if (self.eval_dir / "params_lock.json").exists():
-            print("Parameters already locked. Checking if they are valid...")
             self.validate_parameters()
             return
         
@@ -103,9 +107,27 @@ class LabelConfig(BaseModel):
         os.makedirs(str(self.eval_dir), exist_ok = True)
         with open(self.eval_dir / "params_lock.json", "w") as f:
             json.dump(params, f, indent = 4)
+
+        
+    def lock_subnetwork_label_params(self):
+        params = self.model_dump(include={"labels_name", "sample_network_absolute", "feature_labels_absolute"})
+        os.makedirs(str(self.subnetwork_labels_dir / self.labels_name), exist_ok = True)
+        with open(self.subnetwork_labels_dir / self.labels_name / "params_lock.json", "w") as f:
+            json.dump(params, f, indent = 4)
+
+    def validate_subnetwork_label_params(self):
+        with open(self.subnetwork_labels_dir / self.labels_name / "params_lock.json", "r") as f:
+            locked_params = json.load(f)
+
+        config_params = self.model_dump(include={"labels_name", "sample_network_absolute", "feature_labels_absolute"})
+        assert locked_params == config_params, f"Current subnetwork label parameters do not match locked parameters. Locked parameters: {locked_params}, current parameters: {config_params}"
+        return True
+
         
     
     def validate_parameters(self):
+        if not (self.eval_dir / "params_lock.json").exists():
+            return True # No locked parameters to validate against, so we consider it valid
         with open(self.eval_dir / "params_lock.json", "r") as f:
             locked_params = json.load(f)
 

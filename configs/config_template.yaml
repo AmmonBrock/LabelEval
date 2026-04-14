@@ -2,6 +2,7 @@
 ##################### Evaluation Parameters ####################
 ################################################################
 eval_name: "template_eval"
+labels_name: "medium_network_labels"
 n_questions: 30
 character_1: "A"
 character_2: "B"

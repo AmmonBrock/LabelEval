@@ -21,7 +21,7 @@ def load_config(config_path):
 class LabelEvaluation:
     def __init__(self, config: LabelConfig, iteration = 0):
         self.config = config
-        self.weight_network = LabelRetriever(config) 
+        self.weight_network = LabelRetriever(config, use_subnetwork_labels = True) 
         self.n_sampled_features = self.weight_network.sample_indices.shape[1]
 
         self.max_layer = config.n_layers - 1
@@ -38,6 +38,7 @@ class LabelEvaluation:
         self.token_ids_2 = []
         self.iteration = iteration
         self.validation = config.validation
+
 
     def _lazy_load_judge_model(self, judge_model_id):
         if self.llm is None or self.current_model_id != judge_model_id:
@@ -125,7 +126,7 @@ class LabelEvaluation:
 
         
         # We need n_questions for initial evaluation and n_questions for validation after relabeling, and we need a buffer for invalid descriptions
-        if len(k_downstream_top) < int(k//2) or len(k_downstream_bottom) < int(k//2):
+        if len(k_downstream_top) < self.n_questions * 2 or len(k_downstream_bottom) < self.n_questions * 2:
             raise ValueError(f"Tried to sample {k} neighbors, but only found {len(k_downstream_top)} top neighbors and {len(k_downstream_bottom)} bottom neighbors.")
         
         k_downstream_top_sampled = np.array(k_downstream_top)[int(self.validation)::2] # Take even indices for initial evaluation and odd indices for validation after relabeling
@@ -138,32 +139,19 @@ class LabelEvaluation:
         top_neighbors.dropna(subset = ["description"], inplace = True)
         bottom_neighbors.dropna(subset = ["description"], inplace = True)
 
-        # Create a priority score column that helps us know which labels to keep if there are duplicates
-        priority_map = {"np_max-act": 1, "np_max-act-logits": 2}
-        top_neighbors["priority"] = top_neighbors["typeName"].map(priority_map).fillna(3)
-        bottom_neighbors["priority"] = bottom_neighbors["typeName"].map(priority_map).fillna(3)
-        source["priority"] = source["typeName"].map(priority_map).fillna(3)
-        top_neighbors_sorted = top_neighbors.sort_values(by=["original_feature_idx", "layer", "priority"])
-        bottom_neighbors_sorted = bottom_neighbors.sort_values(by=["original_feature_idx", "layer", "priority"])
-        source_sorted = source.sort_values(by=["original_feature_idx", "layer", "priority"])
-        top_neighbors_deduped = top_neighbors_sorted.drop_duplicates(subset=["original_feature_idx", "layer"], keep="first")
-        bottom_neighbors_deduped = bottom_neighbors_sorted.drop_duplicates(subset=["original_feature_idx", "layer"], keep="first")
-        source_deduped = source_sorted.drop_duplicates(subset=["original_feature_idx", "layer"], keep="first")
-
-        # Resort by weight
-        top_neighbors_deduped = top_neighbors_deduped.sort_values(by="weight_value", ascending=False)
-        bottom_neighbors_deduped = bottom_neighbors_deduped.sort_values(by="weight_value", ascending=True)
+        top_neighbors_sorted = top_neighbors.sort_values(by="weight_value", ascending = False)
+        bottom_neighbors_sorted = bottom_neighbors.sort_values(by="weight_value", ascending = True)
 
         # Only keep n_questions
-        quiz_len = min(len(top_neighbors_deduped), len(bottom_neighbors_deduped), self.n_questions)
+        quiz_len = min(len(top_neighbors_sorted), len(bottom_neighbors_sorted), self.n_questions)
         if quiz_len < self.n_questions:
-            raise ValueError(f"Not enough valid descriptions to generate quiz. Found {len(top_neighbors_deduped)} top descriptions and {len(bottom_neighbors_deduped)} bottom descriptions, but need at least {self.n_questions} of each.")
-        top_neighbors = top_neighbors_deduped.iloc[:self.n_questions]
-        bottom_neighbors = bottom_neighbors_deduped.iloc[:self.n_questions]
+            raise ValueError(f"Not enough valid descriptions to generate quiz. Found {len(top_neighbors_sorted)} top descriptions and {len(bottom_neighbors_sorted)} bottom descriptions, but need at least {self.n_questions} of each.")
+        top_neighbors = top_neighbors_sorted.iloc[:self.n_questions]
+        bottom_neighbors = bottom_neighbors_sorted.iloc[:self.n_questions]
 
-        if len(source_deduped) == 0:
+        if len(source) == 0:
             raise ValueError("Source feature has no valid description. Cannot generate quiz.")
-        source_description = source_deduped["description"].iloc[0] 
+        source_description = source["description"].iloc[0] 
         top_descriptions = top_neighbors["description"].tolist()
         bottom_descriptions = bottom_neighbors["description"].tolist()
 
@@ -265,6 +253,8 @@ class LabelEvaluation:
         question_text = prompt_dict["question_text"].format(upstream_or_downstream, source_or_target.lower(), self.character_1, self.character_2)
         system_prompt = f"{preamble} {downstream_description if downstream else upstream_description} {formatting_instructions}\n\n{few_shot}"
         return system_prompt, question_text
+    
+
 
     def evaluate_batch_with_judge(self, feature_tuples, judge_model_id=None, downstream=True, save_results=True):
             """
@@ -285,7 +275,6 @@ class LabelEvaluation:
 
             all_prompts = []
             tracking_info = [] # Keeps track of which prompt belongs to which feature
-            MAX_CHAR_LEN = 1500 # Truncation limit to prevent OOM spikes
 
             print(f"Assembling prompts for {len(feature_tuples)} features...")
             
@@ -301,10 +290,6 @@ class LabelEvaluation:
                     print(f"Skipping Layer {layer}, Feature {feature_idx}: {e}")
                     continue
 
-                # Defensive truncation
-                source_description = source_description[:MAX_CHAR_LEN]
-                top_descriptions = [desc[:MAX_CHAR_LEN] for desc in top_descriptions]
-                bottom_descriptions = [desc[:MAX_CHAR_LEN] for desc in bottom_descriptions]
 
                 if len(top_descriptions) < self.n_questions or len(bottom_descriptions) < self.n_questions:
                     print(f"Skipping Layer {layer}, Feature {feature_idx}: Not enough valid descriptions.")
@@ -545,6 +530,7 @@ class LabelEvaluation:
         
 
 def main(config):
+    config.validate_parameters()
     label_evaluator = LabelEvaluation(config, iteration = 0)
     layers = np.arange(config.n_layers - 1)
     n_samples_per_layer = np.load(str(Path(config.sample_network_absolute) / "sampled_features.npy")).shape[1]
@@ -553,7 +539,7 @@ def main(config):
     random.seed(27)
     random.shuffle(combos)
 
-    label_evaluator.evaluate_batch_with_judge(combos[:200], downstream = True, save_results = True)
+    label_evaluator.evaluate_batch_with_judge(combos[400:600], downstream = True, save_results = True)
     label_evaluator.calc_p_value(downstream = True)
 
     print("\nShutting down vLLM gracefully...")

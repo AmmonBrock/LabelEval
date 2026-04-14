@@ -2,3 +2,4 @@
 *.db
 results/*
 *.yaml
+subnetwork_labels/*
