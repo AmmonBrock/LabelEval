@@ -11,6 +11,8 @@ from scipy.stats import binomtest
 import math
 import random
 import time
+import gc
+
 
 def load_config(config_path):
     label_eval_dir = Path(__file__).resolve().parent
@@ -43,7 +45,7 @@ class LabelEvaluation:
     def _lazy_load_judge_model(self, judge_model_id):
         if self.llm is None or self.current_model_id != judge_model_id:
             print(f"Loading judge model {judge_model_id}...")
-            self.llm = LLM(model = judge_model_id, enable_prefix_caching = True, gpu_memory_utilization = .7)
+            self.llm = LLM(model = judge_model_id, enable_prefix_caching = True, gpu_memory_utilization = .7, enforce_eager = True) #enforce_eager is new
             self.tokenizer = self.llm.get_tokenizer()
             self.current_model_id = judge_model_id
             target_strings_1 = [self.character_1, f" {self.character_1}"]
@@ -279,8 +281,10 @@ class LabelEvaluation:
             print(f"Assembling prompts for {len(feature_tuples)} features...")
             
             # --- PHASE 1: PROMPT ASSEMBLY ---
-            for layer, feature_idx in feature_tuples:
+            for idx_in_batch, (layer, feature_idx) in enumerate(feature_tuples):
                 # Skip if already evaluated
+                if idx_in_batch % 50 == 49:
+                    gc.collect()
                 if save_results and self.get_evaluation_result(layer, feature_idx, downstream) != {}:
                     continue
                     
@@ -315,6 +319,7 @@ class LabelEvaluation:
                         "feature_idx": feature_idx,
                         "correct_answer": correct_position
                     })
+
 
             if not all_prompts:
                 print("No valid prompts generated. Exiting batch evaluation.")
@@ -357,6 +362,13 @@ class LabelEvaluation:
 
                 if save_results:
                     self.save_evaluation_result(layer=layer, feature_idx=feature_idx, downstream=downstream, score=accuracy)
+
+            # Explicitly free memory from vLLM outputs and intermediate lists
+            del outputs
+            del all_prompts
+            del tracking_info
+            del results_by_feature
+            gc.collect()
 
             end = time.time()
             print(f"Batch evaluation completed in {end - start:.2f} seconds.")
@@ -529,17 +541,26 @@ class LabelEvaluation:
 
         
 
-def main(config):
+def main(config, layer):
     config.validate_parameters()
     label_evaluator = LabelEvaluation(config, iteration = 0)
     layers = np.arange(config.n_layers - 1)
     n_samples_per_layer = np.load(str(Path(config.sample_network_absolute) / "sampled_features.npy")).shape[1]
     indices = np.arange(n_samples_per_layer)
-    combos = [(i, j) for i in layers for j in indices]
-    random.seed(27)
-    random.shuffle(combos)
+    combos = [(layer, idx) for idx in indices]
+    # combos = [(i, j) for i in layers for j in indices]
+    # random.seed(27)
+    # random.shuffle(combos)
 
-    label_evaluator.evaluate_batch_with_judge(combos[400:600], downstream = True, save_results = True)
+    batch_size = 300
+    for i, batch_start in enumerate(range(0, n_samples_per_layer, batch_size)):
+        batch_end = min(batch_start + batch_size, n_samples_per_layer)
+        batch_combos = combos[batch_start:batch_end]
+        print(f"Evaluating batch {i+1}/{math.ceil(n_samples_per_layer/batch_size)}: features {batch_start} to {batch_end-1}")
+        label_evaluator.evaluate_batch_with_judge(batch_combos, downstream = True, save_results = True)
+        # if i % 5 == 0:
+        #     label_evaluator.calc_p_value(downstream = True)
+
     label_evaluator.calc_p_value(downstream = True)
 
     print("\nShutting down vLLM gracefully...")
@@ -559,11 +580,10 @@ def main(config):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Evaluate feature labels based on feature-connections")
     parser.add_argument("--config", type=str, required=True, help="Path to YAML configuration file relative to configs directory")
+    parser.add_argument("--layer", type=int, default=0, help="Layer of the feature to evaluate")
     args = parser.parse_args()
     config = load_config(args.config)
-    main(config)
+    main(config, args.layer)
 
 
         
-
-

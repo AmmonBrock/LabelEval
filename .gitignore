@@ -3,3 +3,4 @@
 results/*
 *.yaml
 subnetwork_labels/*
+*.out
