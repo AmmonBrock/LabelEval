@@ -7,7 +7,7 @@
 #SBATCH --gpus=h200:1
 #SBATCH --mem=50G               # Request 50GB of memory
 #SBATCH --cpus-per-task=8       # Request 8 CPU cores
-#SBATCH --array=0-24%2           # Request 25 jobs in array with a maximum of 2 concurrent jobs
+#SBATCH --array=4-24%1           # Request 25 jobs in array with a maximum of 1 running at a time
 
 # Change to the directory from which the job was submitted
 cd /home/ammonbro/LabelEval

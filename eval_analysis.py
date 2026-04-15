@@ -71,5 +71,5 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="analyze feature evaluations")
     parser.add_argument("--config", help="Path to the label config file")
     args = parser.parse_args()
-    config = LabelConfig(args.config)
+    config = LabelConfig.from_yaml(os.path.join("configs", args.config))
     main(config)
