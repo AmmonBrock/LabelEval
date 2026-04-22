@@ -3,6 +3,8 @@ from configs.label_config import LabelConfig
 import argparse
 from matplotlib import pyplot as plt
 import os
+import numpy as np
+import pandas as pd
 
 
 
@@ -53,6 +55,35 @@ def plot_score_distribution_per_layer(config, all_layer_scores):
     plt.tight_layout()
     plt.savefig(str(config.eval_dir / "images" / "score_distribution_per_layer.png"))
     plt.close()
+
+def view_extreme_scorers(config, downstream = True):
+    stream = "downstream" if downstream else "upstream"
+    scores = []
+    layers = []
+    indices = []
+    with shelve.open(str(config.eval_dir / "scores"), "r") as db:
+        # Implementation for viewing extreme scorers
+        for key in db.keys():
+            if stream in key:
+                layer, f_idx, _ = key.split("_")
+                score = db[key]["score"]
+                scores.append(score)
+                layers.append(int(layer))
+                indices.append(int(f_idx))
+    
+    scores = np.array(scores)
+    layers = np.array(layers)
+    indices = np.array(indices)
+
+    insane_mask = scores > .9
+    insane_scores = scores[insane_mask]
+    insane_layers = layers[insane_mask]
+    insane_indices = indices[insane_mask]
+
+    labels_df = pd.read_csv(config.subnetwork_labels_dir / config.labels_name / "labels.csv")
+
+    #TODO finish
+
 
 
 
