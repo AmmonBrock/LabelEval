@@ -56,7 +56,7 @@ def plot_score_distribution_per_layer(config, all_layer_scores):
     plt.savefig(str(config.eval_dir / "images" / "score_distribution_per_layer.png"))
     plt.close()
 
-def view_extreme_scorers(config, downstream = True):
+def view_extreme_scorers(config, downstream = True, high = True, threshold = .1):
     stream = "downstream" if downstream else "upstream"
     scores = []
     layers = []
@@ -75,14 +75,47 @@ def view_extreme_scorers(config, downstream = True):
     layers = np.array(layers)
     indices = np.array(indices)
 
-    insane_mask = scores > .9
+    insane_mask = scores > (1 - threshold) if high else scores < threshold
     insane_scores = scores[insane_mask]
     insane_layers = layers[insane_mask]
     insane_indices = indices[insane_mask]
 
     labels_df = pd.read_csv(config.subnetwork_labels_dir / config.labels_name / "labels.csv")
+    filter_df = pd.DataFrame({'sample_index': insane_indices, 'layer': insane_layers, 'score': insane_scores})
+    merged_df = pd.merge(labels_df, filter_df, on = ['sample_index', 'layer'], how = 'inner')
 
-    #TODO finish
+    return merged_df.sort_values(by = "score", ascending = not high)
+
+def plot_layer_score_scatter(config, all_layer_scores):
+    # Create a scatter plot of scores for each layer
+    plt.figure(figsize=(10, 6))
+    for layer, scores in all_layer_scores.items():
+        plt.scatter([layer] * len(scores), scores, alpha=0.5)
+    plt.title('Score Scatter Plot per Layer')
+    plt.xlabel('Layer')
+    plt.ylabel('Score')
+    plt.xticks(list(all_layer_scores.keys()))
+    plt.grid()
+    os.makedirs(str(config.eval_dir / "images"), exist_ok = True)
+    plt.savefig(str(config.eval_dir / "images" / "score_scatter_per_layer.png"))
+    plt.close()
+
+def plot_layer_score_boxplot(config, all_layer_scores):
+    # Create a boxplot of scores for each layer
+    plt.figure(figsize=(10, 6))
+    layers = list(all_layer_scores.keys())
+    scores = [all_layer_scores[layer] for layer in layers]
+    plt.boxplot(scores, tick_labels=layers)
+    plt.title('Score Boxplot per Layer')
+    plt.xlabel('Layer')
+    plt.ylabel('Score')
+    plt.xticks(layers)
+    plt.grid()
+    os.makedirs(str(config.eval_dir / "images"), exist_ok = True)
+    plt.savefig(str(config.eval_dir / "images" / "score_boxplot_per_layer.png"))
+    plt.close()
+
+
 
 
 
