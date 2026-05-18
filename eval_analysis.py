@@ -5,6 +5,7 @@ from matplotlib import pyplot as plt
 import os
 import numpy as np
 import pandas as pd
+import re
 
 
 
@@ -116,6 +117,112 @@ def plot_layer_score_boxplot(config, all_layer_scores):
     plt.close()
 
 
+def computational_intermediate_analysis(config):
+    all_scores = view_extreme_scorers(config, threshold = 1.) # Gets the scores for all features
+    # We remove Oklahoma from the list of states because its capital contains the name of the state which defeats the purpose of using a computational intermediate
+    states = [
+        "Alabama", "Alaska", "Arizona", "California", "Colorado", 
+        "Connecticut", "Florida", "Georgia", "Illinois", "Iowa", 
+        "Kansas", "Kentucky", "Louisiana", "Maine", "Maryland", 
+        "Michigan", "Minnesota", "Mississippi", "Missouri", "Montana", 
+        "Nebraska", "Nevada", "New Jersey", "New Mexico", "New York", 
+        "North Carolina", "North Dakota", "Ohio", "Oregon", "Pennsylvania", 
+        "South Dakota", "Tennessee", "Texas", "Utah", "Vermont", 
+        "Washington", "Wisconsin", "Wyoming"
+    ]
+
+    ### For later
+    # state_capitals = [
+    #     "Montgomery", "Juneau", "Phoenix", "Sacramento", "Denver", 
+    #     "Hartford", "Tallahassee", "Atlanta", "Springfield", "Des Moines", 
+    #     "Topeka", "Frankfort", "Baton Rouge", "Augusta", "Annapolis", 
+    #     "Lansing", "St. Paul", "Jackson", "Jefferson City", "Helena", 
+    #     "Lincoln", "Carson City", "Trenton", "Santa Fe", "Albany", 
+    #     "Raleigh", "Bismarck", "Columbus", "Salem", "Harrisburg", 
+    #     "Pierre", "Nashville", "Austin", "Salt Lake City", "Montpelier", 
+    #     "Olympia", "Madison", "Cheyenne"
+    # ]
+    # state_cities = [
+    #     "Birmingham", "Anchorage", "Tucson", "Los Angeles", "Boulder", 
+    #     "New Haven", "Miami", "Savannah", "Chicago", "Cedar Rapids", 
+    #     "Wichita", "Louisville", "New Orleans", "Bangor", "Baltimore", 
+    #     "Detroit", "Minneapolis", "Biloxi", "St. Louis", "Bozeman", 
+    #     "Omaha", "Las Vegas", "Princeton", "Albuquerque", "Buffalo", 
+    #     "Charlotte", "Fargo", "Cleveland", "Eugene", "Philadelphia", 
+    #     "Sioux Falls", "Memphis", "Dallas", "Provo", "Burlington", 
+    #     "Seattle", "Milwaukee", "Laramie"
+    # ]
+
+    countries = [
+        "Australia", "Belgium", "Brazil", "Canada", "China", 
+        "Colombia", "Croatia", "Ecuador", "France", "Germany", 
+        "Greece", "India", "Iran", "Iraq", "Israel", 
+        "Italy", "Japan", "Kazakhstan", "Kenya", "Morocco", 
+        "Myanmar", "Netherlands", "New Zealand", "Nigeria", "Norway", 
+        "Pakistan", "Peru", "Philippines", "Poland", "Portugal", 
+        "Saudi Arabia", "South Africa", "South Korea", "Spain", "Sweden", 
+        "Switzerland", "Tanzania", "Turkey", "United Arab Emirates", "United Kingdom", 
+        "United States", "Vietnam"
+    ]
+    # country_capitals = [
+    #     "Canberra", "Brussels", "Brasilia", "Ottawa", "Beijing", 
+    #     "Bogota", "Zagreb", "Quito", "Paris", "Berlin", 
+    #     "Athens", "New Delhi", "Tehran", "Baghdad", "Jerusalem", 
+    #     "Rome", "Tokyo", "Astana", "Nairobi", "Rabat", 
+    #     "Naypyidaw", "Amsterdam", "Wellington", "Abuja", "Oslo", 
+    #     "Islamabad", "Lima", "Manila", "Warsaw", "Lisbon", 
+    #     "Riyadh", "Pretoria", "Seoul", "Madrid", "Stockholm", 
+    #     "Bern", "Dodoma", "Ankara", "Abu Dhabi", "London", 
+    #     "Washington, D.C.", "Hanoi"
+    # ]
+
+    # country_cities = [
+    #     "Sydney", "Antwerp", "Rio de Janeiro", "Toronto", "Shanghai", 
+    #     "Medellin", "Dubrovnik", "Guayaquil", "Marseille", "Munich", 
+    #     "Thessaloniki", "Mumbai", "Isfahan", "Basra", "Tel Aviv", 
+    #     "Milan", "Osaka", "Almaty", "Mombasa", "Casablanca", 
+    #     "Yangon", "Rotterdam", "Auckland", "Lagos", "Bergen", 
+    #     "Karachi", "Cusco", "Cebu", "Krakow", "Porto", 
+    #     "Jeddah", "Johannesburg", "Busan", "Barcelona", "Gothenburg", 
+    #     "Geneva", "Dar es Salaam", "Istanbul", "Dubai", "Liverpool", 
+    #     "Chicago", "Ho Chi Minh City"
+    # ]
+
+    countries_and_states = states + countries
+
+    pattern = r'\b(?:' + '|'.join(countries_and_states) + r')\b'
+    replacement_candidates = all_scores.loc[all_scores.description.str.contains(pattern, case = False, na = False, regex = True)].copy()
+
+
+    # Add entity_name and country columns
+    standard_name_map = {entity.lower(): entity for entity in countries_and_states}
+    is_country_map = {entity.lower(): (entity in countries) for entity in countries_and_states}
+    sorted_entities = sorted(countries_and_states, key=len, reverse=True)
+    extract_pattern = r'\b(' + '|'.join(sorted_entities) + r')\b'
+    extracted_matches = replacement_candidates['description'].str.extract(extract_pattern, flags=re.IGNORECASE, expand=False)
+    replacement_candidates['entity_name'] = extracted_matches.str.lower().map(standard_name_map)
+    replacement_candidates['country'] = extracted_matches.str.lower().map(is_country_map)
+
+    #After reviewing the descriptions manually, I decided to remove features that contained multiple unrelated concepts, multiple states, or only referred to a city
+    to_remove = ["India and China", 'Mentions "means" or "New York"', "Hungary and Belgium", "New York City", "COVID-19 and Australia", "Alaska or Finland", "Washington D.C.", "Canada and Licenses", "United States and charts/numbers", "New York City, cities", "North Carolina, New South Wales", "Denmark and Germany names/places", "Wisconsin, universities, geography", "Alaska Native/Canadian", "Pennsylvania, education, therapy", "Louisiana and PHP code", 'Mathematica, Utah, "ica"', "New Zealand, code", "Locations/Maryland/Virginia", "Bond/Ecuador/bonds", "United Arab Emirates and NYC", "Locations in Washington/Oregon", "HTML and California", "code, definitions, Nigeria"]
+    replacement_candidates = replacement_candidates.loc[~replacement_candidates.description.isin(to_remove)]
+
+
+
+
+
+def get_scores_for_features(config, layers, original_indices, downstream = True):
+    from label_evaluation import LabelEvaluation
+    le = LabelEvaluation(config)
+    for layer, orig_idx in zip(layers, original_indices):
+        try:
+            sample_index = le.weight_network.convert_original_to_sample_index(orig_idx, layer)
+            print(f"Feature on layer {layer} at original index {orig_idx}: {le.get_evaluation_result(layer, sample_index, downstream)}")
+        except:
+            print(f"Skipping layer {layer} index {orig_idx}")
+            continue
+
+        
 
 
 
